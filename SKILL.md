@@ -89,9 +89,11 @@ python scripts/codex_sync.py restore --repo C:\sync\codex-data --strategy confli
 
 ```powershell
 python scripts/codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\codex-data\codex-sync.snapshot
+python scripts/codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\snapshots --auto-name
 ```
 
 This prompts for a password and writes a single encrypted file.
+With `--auto-name`, the file name includes machine, platform, UTC timestamp, and scope markers such as sessions/history.
 
 ### Restore a workspace from an encrypted snapshot
 
@@ -115,7 +117,7 @@ This prompts for the password again before decrypting.
 - `snapshot-create` requires a password. If you do not pass `--password` or `--password-env`, it prompts and asks for confirmation.
 - `snapshot-restore` requires the same password to decrypt.
 - The encrypted snapshot is the file you can safely commit or sync to GitHub instead of the plaintext `data/` directory.
-- The snapshot header now records scope metadata such as file count, include targets, extra paths, source machine, and manifest generation time.
+- The snapshot header now records scope metadata such as file count, include targets, extra paths, source machine, manifest generation time, tool version, platform info, Python version, and Codex CLI version when detectable.
 - Credentials are still excluded from the snapshot because they are excluded from the sync workspace itself.
 
 ## When To Read References

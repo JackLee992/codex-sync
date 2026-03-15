@@ -6,10 +6,13 @@ import hashlib
 import hmac
 import json
 import os
+import platform
 import secrets
 import shutil
 import socket
 import struct
+import subprocess
+import sys
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -38,6 +41,25 @@ class FileEntry:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def utc_compact_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def sanitize_label(value: str) -> str:
+    cleaned = []
+    for char in value:
+        if char.isalnum():
+            cleaned.append(char.lower())
+        elif char in ("-", "_", "."):
+            cleaned.append(char)
+        else:
+            cleaned.append("-")
+    compact = "".join(cleaned).strip("-")
+    while "--" in compact:
+        compact = compact.replace("--", "-")
+    return compact or "unknown"
 
 
 def sha256_file(path: Path) -> str:
@@ -97,6 +119,43 @@ def load_json(path: Path, default: dict) -> dict:
 def save_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def detect_command_version(command: List[str]) -> str | None:
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return None
+
+    for stream in (completed.stdout, completed.stderr):
+        text = (stream or "").strip()
+        if text:
+            return text.splitlines()[0].strip()
+    return None
+
+
+def gather_runtime_metadata() -> dict:
+    codex_version = detect_command_version(["codex", "--version"])
+    if codex_version is None and os.name == "nt":
+        codex_version = detect_command_version(["codex.exe", "--version"])
+
+    return {
+        "codex_cli_version": codex_version,
+        "platform": {
+            "machine": platform.machine(),
+            "platform": platform.platform(),
+            "python_version": sys.version.split()[0],
+            "release": platform.release(),
+            "system": platform.system(),
+            "version": platform.version(),
+        },
+    }
 
 
 def ensure_repo_initialized(repo: Path) -> Tuple[Path, Path, Path]:
@@ -283,6 +342,7 @@ def build_snapshot_header(salt: bytes, nonce: bytes, repo: Path) -> bytes:
     config = load_json(config_path, {})
     manifest = load_json(manifest_path, {"files": {}})
     files = manifest.get("files", {})
+    runtime = manifest.get("runtime", config.get("runtime", {}))
     snapshot_meta = {
         "file_count": len(files),
         "generated_at": manifest.get("generated_at"),
@@ -290,6 +350,7 @@ def build_snapshot_header(salt: bytes, nonce: bytes, repo: Path) -> bytes:
         "extra_include": manifest.get("extra_include", config.get("default_extra_include", [])),
         "machine": manifest.get("machine", config.get("machine")),
         "source_codex_home": manifest.get("source_codex_home"),
+        "runtime": runtime,
     }
     header = {
         "created_at": utc_now(),
@@ -336,6 +397,37 @@ def summarize_scope(include: Iterable[str], extra_include: Iterable[str]) -> str
     return ", ".join(scope)
 
 
+def build_snapshot_filename(repo: Path, manifest_payload: dict, suffix: str = ".snapshot") -> str:
+    runtime = manifest_payload.get("runtime", {})
+    platform_meta = runtime.get("platform", {})
+    machine = sanitize_label(manifest_payload.get("machine") or socket.gethostname())
+    system = sanitize_label(platform_meta.get("system") or platform.system())
+    timestamp = utc_compact_now()
+    file_count = manifest_payload.get("files", {})
+    include = manifest_payload.get("include", [])
+    sessions_tag = "sess" if "sessions" in include else "nosess"
+    history_tag = "hist" if "history.jsonl" in manifest_payload.get("extra_include", []) else "nohist"
+    return f"codex-sync-{machine}-{system}-{timestamp}-{sessions_tag}-{history_tag}-f{len(file_count)}{suffix}"
+
+
+def resolve_snapshot_output(repo: Path, output_value: str | None, auto_name: bool) -> Path:
+    if output_value is None:
+        if not auto_name:
+            raise SystemExit("--output is required unless --auto-name is used.")
+        output_root = repo
+    else:
+        output_root = Path(output_value).expanduser()
+
+    _, _, manifest_path = ensure_repo_initialized(repo)
+    manifest_payload = load_json(manifest_path, {"files": {}})
+    if auto_name:
+        directory = output_root if output_root.suffix == "" else output_root.parent
+        filename = build_snapshot_filename(repo, manifest_payload)
+        return (directory / filename).resolve()
+
+    return output_root.resolve()
+
+
 def classify_relative_path(relative: str) -> str:
     top_level = relative.split("/", 1)[0]
     return "config" if relative == "config.toml" else top_level
@@ -357,6 +449,7 @@ def command_init(args: argparse.Namespace) -> None:
     repo = Path(args.repo).expanduser().resolve()
     include = normalize_include(args.include or DEFAULT_INCLUDE)
     extra_include = normalize_extra_include(args.extra_include)
+    runtime = gather_runtime_metadata()
     meta, config_path, manifest_path = repo_paths(repo)
     meta.mkdir(parents=True, exist_ok=True)
     (repo / "data").mkdir(parents=True, exist_ok=True)
@@ -367,6 +460,7 @@ def command_init(args: argparse.Namespace) -> None:
             "default_include": include,
             "default_extra_include": extra_include,
             "machine": socket.gethostname(),
+            "runtime": runtime,
             "tool_version": TOOL_VERSION,
             "version": 2,
         },
@@ -387,6 +481,7 @@ def command_backup(args: argparse.Namespace) -> None:
     extra_include = normalize_extra_include(args.extra_include or config.get("default_extra_include", []))
     codex_home = codex_home_from_arg(args.codex_home)
     data_root = repo / "data"
+    runtime = gather_runtime_metadata()
 
     current = manifest_from_source(codex_home, include, extra_include)
     previous = load_manifest_entries(manifest_path)
@@ -409,6 +504,7 @@ def command_backup(args: argparse.Namespace) -> None:
             "include": include,
             "extra_include": extra_include,
             "machine": socket.gethostname(),
+            "runtime": runtime,
             "source_codex_home": str(codex_home),
             "tool_version": TOOL_VERSION,
         },
@@ -590,7 +686,7 @@ def command_restore(args: argparse.Namespace) -> None:
 def command_snapshot_create(args: argparse.Namespace) -> None:
     repo = Path(args.repo).expanduser().resolve()
     ensure_repo_initialized(repo)
-    output = Path(args.output).expanduser().resolve()
+    output = resolve_snapshot_output(repo, args.output, args.auto_name)
     password = get_password(args, "Snapshot", confirm=True)
     salt = secrets.token_bytes(16)
     nonce = secrets.token_bytes(16)
@@ -697,7 +793,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     snapshot_create_parser = subparsers.add_parser("snapshot-create", help="Create an encrypted snapshot file from a sync workspace.")
     snapshot_create_parser.add_argument("--repo", required=True, help="Path to the sync workspace.")
-    snapshot_create_parser.add_argument("--output", required=True, help="Encrypted snapshot file to create.")
+    snapshot_create_parser.add_argument("--output", help="Encrypted snapshot file to create, or a directory when used with --auto-name.")
+    snapshot_create_parser.add_argument("--auto-name", action="store_true", help="Generate a descriptive filename based on machine, platform, timestamp, and scope.")
     snapshot_create_parser.add_argument("--password", help="Password for non-interactive use.")
     snapshot_create_parser.add_argument("--password-confirm", help="Confirmation for non-interactive use.")
     snapshot_create_parser.add_argument("--password-env", help="Read the password from an environment variable.")

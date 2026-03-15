@@ -50,10 +50,12 @@ python codex_sync.py diff --repo C:\sync\codex-data
 python codex_sync.py restore --repo C:\sync\codex-data --strategy conflict --preview
 python codex_sync.py restore --repo C:\sync\codex-data --strategy conflict --extra-include history.jsonl
 python codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\codex-data\codex-sync.snapshot
+python codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\snapshots --auto-name
 python codex_sync.py snapshot-restore --snapshot C:\sync\codex-data\codex-sync.snapshot --repo C:\sync\codex-data --force
 ```
 
 `--extra-include` accepts file or directory paths relative to `~/.codex`. The most useful example is `history.jsonl`.
+`snapshot-create --auto-name` generates a filename like `codex-sync-<machine>-<platform>-<timestamp>-<scope>.snapshot`.
 
 ## Restore Strategies
 
@@ -83,5 +85,7 @@ python codex_sync.py snapshot-restore --snapshot C:\sync\codex-data\codex-sync.s
 
 - `history.jsonl` and similar files can be included via `--extra-include`
 - workspace manifests now record include scope, extra paths, source machine, and tool version
+- workspace manifests and snapshot headers now record tool, platform, Python, and Codex CLI version info when available
 - encrypted snapshot headers now carry enough metadata to inspect the snapshot scope after restore
+- snapshot files can now be auto-named with machine/platform/time markers for easier multi-machine comparison
 - `restore --preview` shows copy/overwrite/conflict actions without modifying local files

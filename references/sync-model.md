@@ -55,6 +55,7 @@ Excluded by default:
 - extra include paths
 - source machine and Codex home
 - tool version
+- platform, Python, and Codex CLI version metadata when available
 
 Files removed from the source are removed from the workspace on the next backup if they are still under the tracked scope.
 
@@ -105,7 +106,8 @@ If you do not want the `data/` directory in plaintext on a remote service, use:
 - `snapshot-restore` to unpack it on another machine
 
 The password is not stored in the workspace. Without the password, the snapshot cannot be restored.
-The snapshot header records metadata such as file count, include scope, extra paths, source machine, and manifest generation time.
+The snapshot header records metadata such as file count, include scope, extra paths, source machine, manifest generation time, and runtime version details.
+Use `snapshot-create --auto-name` if you want the output filename to include machine/platform/timestamp markers for easier comparison across computers.
 
 Recommended GitHub pattern:
 
