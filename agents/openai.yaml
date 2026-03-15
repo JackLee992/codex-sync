@@ -1,0 +1,5 @@
+version: 1
+interface:
+  display_name: Codex Sync
+  short_description: Backup and sync portable Codex data across machines.
+  default_prompt: Export, compare, and restore portable Codex data like skills, memories, rules, and selected config with explicit conflict handling.
