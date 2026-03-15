@@ -51,11 +51,13 @@ python codex_sync.py restore --repo C:\sync\codex-data --strategy conflict --pre
 python codex_sync.py restore --repo C:\sync\codex-data --strategy conflict --extra-include history.jsonl
 python codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\codex-data\codex-sync.snapshot
 python codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\snapshots --auto-name
+python codex_sync.py snapshot-info --snapshot C:\sync\snapshots\codex-sync-desktop-a-windows-20260315T120000Z-sess-hist-f118.snapshot
 python codex_sync.py snapshot-restore --snapshot C:\sync\codex-data\codex-sync.snapshot --repo C:\sync\codex-data --force
 ```
 
 `--extra-include` accepts file or directory paths relative to `~/.codex`. The most useful example is `history.jsonl`.
 `snapshot-create --auto-name` generates a filename like `codex-sync-<machine>-<platform>-<timestamp>-<scope>.snapshot`.
+`snapshot-info` reads the unencrypted header only, so you can inspect version, machine, platform, and scope before restoring.
 
 ## Restore Strategies
 

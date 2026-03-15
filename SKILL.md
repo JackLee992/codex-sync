@@ -103,6 +103,15 @@ python scripts/codex_sync.py snapshot-restore --snapshot C:\sync\codex-data\code
 
 This prompts for the password again before decrypting.
 
+### Inspect snapshot metadata without decrypting it
+
+```powershell
+python scripts/codex_sync.py snapshot-info --snapshot C:\sync\codex-data\codex-sync.snapshot
+python scripts/codex_sync.py snapshot-info --snapshot C:\sync\codex-data\codex-sync.snapshot --json
+```
+
+This reads only the snapshot header so you can see machine, version, runtime, and scope information before restore.
+
 ## Merge Strategies
 
 - `conflict`: safe default; keep local file and write incoming copy as `*.codex-sync-incoming`

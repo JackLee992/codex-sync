@@ -428,6 +428,45 @@ def resolve_snapshot_output(repo: Path, output_value: str | None, auto_name: boo
     return output_root.resolve()
 
 
+def read_snapshot_header(snapshot: Path) -> tuple[bytes, dict, bytes]:
+    with snapshot.open("rb") as reader:
+        magic = reader.read(len(SNAPSHOT_MAGIC))
+        if magic != SNAPSHOT_MAGIC:
+            raise SystemExit("Invalid snapshot file.")
+        header_len = struct.unpack(">I", reader.read(4))[0]
+        header = reader.read(header_len)
+        header_obj = json.loads(header.decode("utf-8"))
+        ciphertext = reader.read()
+    return header, header_obj, ciphertext
+
+
+def print_snapshot_summary(header_obj: dict, snapshot_path: Path) -> None:
+    snapshot_meta = header_obj.get("snapshot", {})
+    runtime = snapshot_meta.get("runtime", {})
+    platform_meta = runtime.get("platform", {})
+    print(f"Snapshot      : {snapshot_path}")
+    print(f"Format        : {header_obj.get('format', 'unknown')}")
+    print(f"Version       : {header_obj.get('version', 'unknown')}")
+    print(f"Tool version  : {header_obj.get('tool_version', 'unknown')}")
+    print(f"Created at    : {header_obj.get('created_at', 'unknown')}")
+    print(f"Host          : {header_obj.get('hostname', 'unknown')}")
+    print(f"Repo name     : {header_obj.get('repo_name', 'unknown')}")
+    print(f"Source machine: {snapshot_meta.get('machine', 'unknown')}")
+    print(f"File count    : {snapshot_meta.get('file_count', 'unknown')}")
+    print(f"Scope         : {summarize_scope(snapshot_meta.get('include', []), snapshot_meta.get('extra_include', []))}")
+    print(f"Generated at  : {snapshot_meta.get('generated_at', 'unknown')}")
+    print(f"Codex home    : {snapshot_meta.get('source_codex_home', 'unknown')}")
+    print(f"Codex CLI     : {runtime.get('codex_cli_version') or 'unknown'}")
+    if platform_meta:
+        print(
+            "Platform      : "
+            f"{platform_meta.get('system', 'unknown')} "
+            f"{platform_meta.get('release', '').strip()} "
+            f"{platform_meta.get('machine', '').strip()}".strip()
+        )
+        print(f"Python        : {platform_meta.get('python_version', 'unknown')}")
+
+
 def classify_relative_path(relative: str) -> str:
     top_level = relative.split("/", 1)[0]
     return "config" if relative == "config.toml" else top_level
@@ -712,14 +751,7 @@ def command_snapshot_restore(args: argparse.Namespace) -> None:
     snapshot = Path(args.snapshot).expanduser().resolve()
     repo = Path(args.repo).expanduser().resolve()
     password = get_password(args, "Snapshot", confirm=False)
-    with snapshot.open("rb") as reader:
-        magic = reader.read(len(SNAPSHOT_MAGIC))
-        if magic != SNAPSHOT_MAGIC:
-            raise SystemExit("Invalid snapshot file.")
-        header_len = struct.unpack(">I", reader.read(4))[0]
-        header = reader.read(header_len)
-        header_obj = json.loads(header.decode("utf-8"))
-        ciphertext = reader.read()
+    header, header_obj, ciphertext = read_snapshot_header(snapshot)
     if len(ciphertext) < SNAPSHOT_TAG_SIZE:
         raise SystemExit("Snapshot payload is truncated.")
 
@@ -749,6 +781,17 @@ def command_snapshot_restore(args: argparse.Namespace) -> None:
     if snapshot_meta:
         print(f"Snapshot files : {snapshot_meta.get('file_count', 'unknown')}")
         print(f"Snapshot scope : {summarize_scope(snapshot_meta.get('include', []), snapshot_meta.get('extra_include', []))}")
+
+
+def command_snapshot_info(args: argparse.Namespace) -> None:
+    snapshot = Path(args.snapshot).expanduser().resolve()
+    _, header_obj, ciphertext = read_snapshot_header(snapshot)
+    if len(ciphertext) < SNAPSHOT_TAG_SIZE:
+        raise SystemExit("Snapshot payload is truncated.")
+    if args.json:
+        print(json.dumps(header_obj, indent=2, sort_keys=True))
+        return
+    print_snapshot_summary(header_obj, snapshot)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -807,6 +850,11 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot_restore_parser.add_argument("--password-env", help="Read the password from an environment variable.")
     snapshot_restore_parser.add_argument("--force", action="store_true", help="Replace existing .codex-sync and data directories in the target repo.")
     snapshot_restore_parser.set_defaults(func=command_snapshot_restore)
+
+    snapshot_info_parser = subparsers.add_parser("snapshot-info", help="Read snapshot metadata without decrypting the payload.")
+    snapshot_info_parser.add_argument("--snapshot", required=True, help="Encrypted snapshot file to inspect.")
+    snapshot_info_parser.add_argument("--json", action="store_true", help="Print the raw snapshot header as JSON.")
+    snapshot_info_parser.set_defaults(func=command_snapshot_info)
 
     restore_parser = subparsers.add_parser("restore", help="Restore sync workspace data into local Codex.")
     restore_parser.add_argument("--repo", required=True, help="Path to the sync workspace.")

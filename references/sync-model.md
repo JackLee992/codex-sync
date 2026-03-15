@@ -103,6 +103,7 @@ Use one sync workspace per Codex identity. Keep that workspace in:
 If you do not want the `data/` directory in plaintext on a remote service, use:
 
 - `snapshot-create` to pack `.codex-sync/` and `data/` into one encrypted file
+- `snapshot-info` to inspect header metadata without decrypting or restoring
 - `snapshot-restore` to unpack it on another machine
 
 The password is not stored in the workspace. Without the password, the snapshot cannot be restored.
