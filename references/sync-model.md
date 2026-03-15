@@ -13,6 +13,7 @@
     manifest.json
   data/
     config.toml
+    history.jsonl
     memories/
     rules/
     skills/
@@ -32,8 +33,9 @@ Tracked by default:
 Optional:
 
 - `sessions/`
+- extra files or directories under `~/.codex`, such as `history.jsonl`
 
-Excluded:
+Excluded by default:
 
 - auth and session tokens
 - sqlite databases and WAL/SHM files
@@ -49,6 +51,10 @@ Excluded:
 - sha256
 - file size
 - source mtime
+- include targets
+- extra include paths
+- source machine and Codex home
+- tool version
 
 Files removed from the source are removed from the workspace on the next backup if they are still under the tracked scope.
 
@@ -70,7 +76,9 @@ With `--strategy conflict`, the local file stays untouched and the incoming file
 <filename>.codex-sync-incoming
 ```
 
-Use this when both machines may have changed the same skill or memory file.
+Use this when both machines may have changed the same skill, memory, session, or extra tracked file.
+
+Run `restore --preview` first if you want a dry run before writing anything into the target `~/.codex`.
 
 ## Status
 
@@ -97,6 +105,7 @@ If you do not want the `data/` directory in plaintext on a remote service, use:
 - `snapshot-restore` to unpack it on another machine
 
 The password is not stored in the workspace. Without the password, the snapshot cannot be restored.
+The snapshot header records metadata such as file count, include scope, extra paths, source machine, and manifest generation time.
 
 Recommended GitHub pattern:
 

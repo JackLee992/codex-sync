@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from getpass import getpass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Tuple
+from typing import Dict, Iterable, Iterator, List, Set, Tuple
 
 
 DEFAULT_INCLUDE = ("skills", "memories", "rules", "config")
@@ -25,6 +25,7 @@ ALL_INCLUDE = DEFAULT_INCLUDE + OPTIONAL_INCLUDE
 SYSTEM_SKILL_PREFIX = "skills/.system/"
 SNAPSHOT_MAGIC = b"CDXSNAP1"
 SNAPSHOT_TAG_SIZE = 32
+TOOL_VERSION = 2
 
 
 @dataclass
@@ -55,6 +56,23 @@ def normalize_include(values: Iterable[str]) -> List[str]:
             raise SystemExit(f"Unsupported include target: {value}")
         if lowered not in result:
             result.append(lowered)
+    return result
+
+
+def normalize_extra_include(values: Iterable[str] | None) -> List[str]:
+    if not values:
+        return []
+
+    result: List[str] = []
+    seen: Set[str] = set()
+    for value in values:
+        normalized = value.replace("\\", "/").strip().strip("/")
+        if not normalized:
+            raise SystemExit("Extra include paths cannot be empty.")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
     return result
 
 
@@ -113,9 +131,45 @@ def iter_selected_files(codex_home: Path, include: Iterable[str]) -> Iterator[Tu
             yield relative, path
 
 
-def manifest_from_source(codex_home: Path, include: Iterable[str]) -> Dict[str, FileEntry]:
+def iter_extra_selected_files(codex_home: Path, extra_include: Iterable[str]) -> Iterator[Tuple[str, Path]]:
+    seen: Set[str] = set()
+    for relative_input in extra_include:
+        relative_path = Path(relative_input)
+        source = (codex_home / relative_path).resolve()
+        try:
+            source.relative_to(codex_home)
+        except ValueError as exc:
+            raise SystemExit(f"Extra include path escapes codex home: {relative_input}") from exc
+        if not source.exists():
+            raise SystemExit(f"Extra include path does not exist: {relative_input}")
+
+        candidates: Iterator[Path]
+        if source.is_dir():
+            candidates = (path for path in sorted(source.rglob("*")) if path.is_file())
+        else:
+            candidates = iter((source,))
+
+        for path in candidates:
+            relative = path.relative_to(codex_home).as_posix()
+            if relative.startswith(SYSTEM_SKILL_PREFIX):
+                continue
+            if relative in seen:
+                continue
+            seen.add(relative)
+            yield relative, path
+
+
+def manifest_from_source(codex_home: Path, include: Iterable[str], extra_include: Iterable[str] = ()) -> Dict[str, FileEntry]:
     entries: Dict[str, FileEntry] = {}
     for relative, path in iter_selected_files(codex_home, include):
+        stat = path.stat()
+        entries[relative] = FileEntry(
+            relative_path=relative,
+            sha256=sha256_file(path),
+            size=stat.st_size,
+            mtime=stat.st_mtime,
+        )
+    for relative, path in iter_extra_selected_files(codex_home, extra_include):
         stat = path.stat()
         entries[relative] = FileEntry(
             relative_path=relative,
@@ -225,6 +279,18 @@ def get_password(args: argparse.Namespace, purpose: str, confirm: bool = False) 
 
 
 def build_snapshot_header(salt: bytes, nonce: bytes, repo: Path) -> bytes:
+    _, config_path, manifest_path = ensure_repo_initialized(repo)
+    config = load_json(config_path, {})
+    manifest = load_json(manifest_path, {"files": {}})
+    files = manifest.get("files", {})
+    snapshot_meta = {
+        "file_count": len(files),
+        "generated_at": manifest.get("generated_at"),
+        "include": manifest.get("include", config.get("default_include", list(DEFAULT_INCLUDE))),
+        "extra_include": manifest.get("extra_include", config.get("default_extra_include", [])),
+        "machine": manifest.get("machine", config.get("machine")),
+        "source_codex_home": manifest.get("source_codex_home"),
+    }
     header = {
         "created_at": utc_now(),
         "format": "codex-sync-snapshot",
@@ -232,7 +298,9 @@ def build_snapshot_header(salt: bytes, nonce: bytes, repo: Path) -> bytes:
         "nonce": base64.b64encode(nonce).decode("ascii"),
         "repo_name": repo.name,
         "salt": base64.b64encode(salt).decode("ascii"),
-        "version": 1,
+        "snapshot": snapshot_meta,
+        "tool_version": TOOL_VERSION,
+        "version": 2,
     }
     return json.dumps(header, sort_keys=True).encode("utf-8")
 
@@ -260,9 +328,35 @@ def ensure_snapshot_repo_layout(repo: Path, force: bool) -> None:
     repo.mkdir(parents=True, exist_ok=True)
 
 
+def summarize_scope(include: Iterable[str], extra_include: Iterable[str]) -> str:
+    scope = list(include)
+    extras = list(extra_include)
+    if extras:
+        scope.extend(f"extra:{item}" for item in extras)
+    return ", ".join(scope)
+
+
+def classify_relative_path(relative: str) -> str:
+    top_level = relative.split("/", 1)[0]
+    return "config" if relative == "config.toml" else top_level
+
+
+def should_restore_path(relative: str, include: Iterable[str], extra_include: Iterable[str]) -> bool:
+    normalized_top = classify_relative_path(relative)
+    if normalized_top in include:
+        return True
+    normalized_relative = relative.replace("\\", "/")
+    for extra in extra_include:
+        normalized_extra = extra.replace("\\", "/").strip("/")
+        if normalized_relative == normalized_extra or normalized_relative.startswith(normalized_extra + "/"):
+            return True
+    return False
+
+
 def command_init(args: argparse.Namespace) -> None:
     repo = Path(args.repo).expanduser().resolve()
     include = normalize_include(args.include or DEFAULT_INCLUDE)
+    extra_include = normalize_extra_include(args.extra_include)
     meta, config_path, manifest_path = repo_paths(repo)
     meta.mkdir(parents=True, exist_ok=True)
     (repo / "data").mkdir(parents=True, exist_ok=True)
@@ -271,14 +365,18 @@ def command_init(args: argparse.Namespace) -> None:
         {
             "created_at": utc_now(),
             "default_include": include,
+            "default_extra_include": extra_include,
             "machine": socket.gethostname(),
-            "version": 1,
+            "tool_version": TOOL_VERSION,
+            "version": 2,
         },
     )
     if not manifest_path.exists():
         save_json(manifest_path, {"files": {}, "generated_at": utc_now()})
     print(f"Initialized codex-sync repo: {repo}")
     print(f"Default include: {', '.join(include)}")
+    if extra_include:
+        print(f"Default extra include: {', '.join(extra_include)}")
 
 
 def command_backup(args: argparse.Namespace) -> None:
@@ -286,10 +384,11 @@ def command_backup(args: argparse.Namespace) -> None:
     _, config_path, manifest_path = ensure_repo_initialized(repo)
     config = load_json(config_path, {})
     include = normalize_include(args.include or config.get("default_include", DEFAULT_INCLUDE))
+    extra_include = normalize_extra_include(args.extra_include or config.get("default_extra_include", []))
     codex_home = codex_home_from_arg(args.codex_home)
     data_root = repo / "data"
 
-    current = manifest_from_source(codex_home, include)
+    current = manifest_from_source(codex_home, include, extra_include)
     previous = load_manifest_entries(manifest_path)
 
     for relative, entry in current.items():
@@ -308,17 +407,20 @@ def command_backup(args: argparse.Namespace) -> None:
             "files": manifest_to_json(current)["files"],
             "generated_at": utc_now(),
             "include": include,
+            "extra_include": extra_include,
             "machine": socket.gethostname(),
             "source_codex_home": str(codex_home),
+            "tool_version": TOOL_VERSION,
         },
     )
 
     print(f"Backed up {len(current)} files to {repo}")
     print(f"Removed {len(removed)} files from snapshot")
+    print(f"Scope       : {summarize_scope(include, extra_include)}")
 
 
-def compare_local_to_repo(codex_home: Path, repo: Path, include: Iterable[str]) -> Tuple[List[str], List[str], List[str], List[str]]:
-    local = manifest_from_source(codex_home, include)
+def compare_local_to_repo(codex_home: Path, repo: Path, include: Iterable[str], extra_include: Iterable[str]) -> Tuple[List[str], List[str], List[str], List[str]]:
+    local = manifest_from_source(codex_home, include, extra_include)
     repo_manifest = load_manifest_entries(repo / ".codex-sync" / "manifest.json")
     local_keys = set(local)
     repo_keys = set(repo_manifest)
@@ -337,14 +439,16 @@ def command_status(args: argparse.Namespace) -> None:
         raise SystemExit("Manifest missing; run backup first.")
     config = load_json(config_path, {})
     include = normalize_include(args.include or config.get("default_include", DEFAULT_INCLUDE))
+    extra_include = normalize_extra_include(args.extra_include or config.get("default_extra_include", []))
     codex_home = codex_home_from_arg(args.codex_home)
 
-    only_local, only_repo, changed, identical = compare_local_to_repo(codex_home, repo, include)
+    only_local, only_repo, changed, identical = compare_local_to_repo(codex_home, repo, include, extra_include)
 
     print(f"Local only : {len(only_local)}")
     print(f"Repo only  : {len(only_repo)}")
     print(f"Changed    : {len(changed)}")
     print(f"Identical  : {len(identical)}")
+    print(f"Scope      : {summarize_scope(include, extra_include)}")
     if args.verbose:
         for label, items in (
             ("LOCAL_ONLY", only_local),
@@ -364,10 +468,11 @@ def command_diff(args: argparse.Namespace) -> None:
         raise SystemExit("Manifest missing; run backup first.")
     config = load_json(config_path, {})
     include = normalize_include(args.include or config.get("default_include", DEFAULT_INCLUDE))
+    extra_include = normalize_extra_include(args.extra_include or config.get("default_extra_include", []))
     codex_home = codex_home_from_arg(args.codex_home)
 
-    only_local, only_repo, changed, _ = compare_local_to_repo(codex_home, repo, include)
-    local = manifest_from_source(codex_home, include)
+    only_local, only_repo, changed, _ = compare_local_to_repo(codex_home, repo, include, extra_include)
+    local = manifest_from_source(codex_home, include, extra_include)
     repo_manifest = load_manifest_entries(manifest_path)
 
     for label, items in (
@@ -406,6 +511,7 @@ def command_restore(args: argparse.Namespace) -> None:
     _, config_path, manifest_path = ensure_repo_initialized(repo)
     config = load_json(config_path, {})
     include = normalize_include(args.include or config.get("default_include", DEFAULT_INCLUDE))
+    extra_include = normalize_extra_include(args.extra_include or config.get("default_extra_include", []))
     codex_home = codex_home_from_arg(args.codex_home)
     data_root = repo / "data"
     manifest = load_manifest_entries(manifest_path)
@@ -415,49 +521,70 @@ def command_restore(args: argparse.Namespace) -> None:
     skipped = 0
     conflicts = 0
     overwritten = 0
+    preview_actions: List[Tuple[str, str]] = []
 
     for relative, incoming in sorted(manifest.items()):
-        top_level = relative.split("/", 1)[0]
-        normalized_top = "config" if relative == "config.toml" else top_level
-        if normalized_top not in include:
+        if not should_restore_path(relative, include, extra_include):
             continue
         src = data_root / relative
         dst = codex_home / relative
+        action = ""
         if not dst.exists():
-            copy_with_mtime(src, dst)
+            action = "COPY"
+            if not args.preview:
+                copy_with_mtime(src, dst)
             copied += 1
+            preview_actions.append((action, relative))
             continue
 
         local_hash = sha256_file(dst)
         if local_hash == incoming.sha256:
             skipped += 1
+            preview_actions.append(("SKIP_IDENTICAL", relative))
             continue
 
         if strategy == "backup":
-            copy_with_mtime(src, dst)
+            action = "OVERWRITE"
+            if not args.preview:
+                copy_with_mtime(src, dst)
             overwritten += 1
+            preview_actions.append((action, relative))
             continue
 
         if strategy == "keep":
             skipped += 1
+            preview_actions.append(("SKIP_KEEP", relative))
             continue
 
         if strategy == "newer":
             local_mtime = dst.stat().st_mtime
             if incoming.mtime >= local_mtime:
-                copy_with_mtime(src, dst)
+                action = "OVERWRITE_NEWER"
+                if not args.preview:
+                    copy_with_mtime(src, dst)
                 overwritten += 1
+                preview_actions.append((action, relative))
             else:
                 skipped += 1
+                preview_actions.append(("SKIP_LOCAL_NEWER", relative))
             continue
 
-        write_incoming_conflict(dst, src)
+        action = "CONFLICT"
+        if not args.preview:
+            write_incoming_conflict(dst, src)
         conflicts += 1
+        preview_actions.append((action, relative))
+
+    if args.preview:
+        print("Preview only. No files were changed.")
+        for action, relative in preview_actions:
+            print(f"{action:<16} {relative}")
 
     print(f"Copied      : {copied}")
     print(f"Overwritten : {overwritten}")
     print(f"Skipped     : {skipped}")
     print(f"Conflicts   : {conflicts}")
+    print(f"Scope       : {summarize_scope(include, extra_include)}")
 
 
 def command_snapshot_create(args: argparse.Namespace) -> None:
@@ -522,6 +649,10 @@ def command_snapshot_restore(args: argparse.Namespace) -> None:
             tar.extractall(repo)
 
     print(f"Restored encrypted snapshot into: {repo}")
+    snapshot_meta = header_obj.get("snapshot", {})
+    if snapshot_meta:
+        print(f"Snapshot files : {snapshot_meta.get('file_count', 'unknown')}")
+        print(f"Snapshot scope : {summarize_scope(snapshot_meta.get('include', []), snapshot_meta.get('extra_include', []))}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -535,18 +666,25 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         help=f"Default include set: {', '.join(ALL_INCLUDE)}",
     )
+    init_parser.add_argument(
+        "--extra-include",
+        nargs="+",
+        help="Extra file or directory paths under Codex home, such as history.jsonl",
+    )
     init_parser.set_defaults(func=command_init)
 
     backup_parser = subparsers.add_parser("backup", help="Snapshot Codex data into the sync workspace.")
     backup_parser.add_argument("--repo", required=True, help="Path to the sync workspace.")
     backup_parser.add_argument("--codex-home", help="Override Codex home. Defaults to ~/.codex")
     backup_parser.add_argument("--include", nargs="+", help=f"Include set: {', '.join(ALL_INCLUDE)}")
+    backup_parser.add_argument("--extra-include", nargs="+", help="Extra file or directory paths under Codex home")
     backup_parser.set_defaults(func=command_backup)
 
     status_parser = subparsers.add_parser("status", help="Compare local Codex data with the sync workspace.")
     status_parser.add_argument("--repo", required=True, help="Path to the sync workspace.")
     status_parser.add_argument("--codex-home", help="Override Codex home. Defaults to ~/.codex")
     status_parser.add_argument("--include", nargs="+", help=f"Include set: {', '.join(ALL_INCLUDE)}")
+    status_parser.add_argument("--extra-include", nargs="+", help="Extra file or directory paths under Codex home")
     status_parser.add_argument("--verbose", action="store_true", help="List differing files.")
     status_parser.set_defaults(func=command_status)
 
@@ -554,6 +692,7 @@ def build_parser() -> argparse.ArgumentParser:
     diff_parser.add_argument("--repo", required=True, help="Path to the sync workspace.")
     diff_parser.add_argument("--codex-home", help="Override Codex home. Defaults to ~/.codex")
     diff_parser.add_argument("--include", nargs="+", help=f"Include set: {', '.join(ALL_INCLUDE)}")
+    diff_parser.add_argument("--extra-include", nargs="+", help="Extra file or directory paths under Codex home")
     diff_parser.set_defaults(func=command_diff)
 
     snapshot_create_parser = subparsers.add_parser("snapshot-create", help="Create an encrypted snapshot file from a sync workspace.")
@@ -576,12 +715,14 @@ def build_parser() -> argparse.ArgumentParser:
     restore_parser.add_argument("--repo", required=True, help="Path to the sync workspace.")
     restore_parser.add_argument("--codex-home", help="Override Codex home. Defaults to ~/.codex")
     restore_parser.add_argument("--include", nargs="+", help=f"Include set: {', '.join(ALL_INCLUDE)}")
+    restore_parser.add_argument("--extra-include", nargs="+", help="Extra file or directory paths under Codex home")
     restore_parser.add_argument(
         "--strategy",
         choices=("conflict", "backup", "keep", "newer"),
         default="conflict",
         help="How to handle differing local files.",
     )
+    restore_parser.add_argument("--preview", action="store_true", help="Show restore actions without changing files.")
     restore_parser.set_defaults(func=command_restore)
 
     return parser

@@ -18,6 +18,7 @@ Default:
 Optional:
 
 - `sessions/`
+- extra paths under `~/.codex`, such as `history.jsonl`
 
 Excluded by default:
 
@@ -42,14 +43,17 @@ python "$env:USERPROFILE\\.codex\\skills\\.system\\skill-installer\\scripts\\ins
 ## Commands
 
 ```powershell
-python codex_sync.py init --repo C:\sync\codex-data
-python codex_sync.py backup --repo C:\sync\codex-data
-python codex_sync.py status --repo C:\sync\codex-data
+python codex_sync.py init --repo C:\sync\codex-data --extra-include history.jsonl
+python codex_sync.py backup --repo C:\sync\codex-data --include skills memories rules config sessions --extra-include history.jsonl
+python codex_sync.py status --repo C:\sync\codex-data --extra-include history.jsonl
 python codex_sync.py diff --repo C:\sync\codex-data
-python codex_sync.py restore --repo C:\sync\codex-data --strategy conflict
+python codex_sync.py restore --repo C:\sync\codex-data --strategy conflict --preview
+python codex_sync.py restore --repo C:\sync\codex-data --strategy conflict --extra-include history.jsonl
 python codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\codex-data\codex-sync.snapshot
 python codex_sync.py snapshot-restore --snapshot C:\sync\codex-data\codex-sync.snapshot --repo C:\sync\codex-data --force
 ```
+
+`--extra-include` accepts file or directory paths relative to `~/.codex`. The most useful example is `history.jsonl`.
 
 ## Restore Strategies
 
@@ -64,7 +68,8 @@ python codex_sync.py snapshot-restore --snapshot C:\sync\codex-data\codex-sync.s
 2. Run `backup` on machine A.
 3. Move the workspace using Git, Syncthing, OneDrive, or similar.
 4. Run `diff` or `status` on machine B.
-5. Run `restore` with the strategy you want.
+5. Run `restore --preview` to inspect planned actions.
+6. Run `restore` with the strategy you want.
 
 ## Encrypted Snapshot Flow
 
@@ -73,3 +78,10 @@ python codex_sync.py snapshot-restore --snapshot C:\sync\codex-data\codex-sync.s
 3. Sync only the encrypted snapshot file to GitHub.
 4. On machine B, pull the snapshot file and run `snapshot-restore`.
 5. Enter the same password, then run `diff` or `restore`.
+
+## What Changed In This Version
+
+- `history.jsonl` and similar files can be included via `--extra-include`
+- workspace manifests now record include scope, extra paths, source machine, and tool version
+- encrypted snapshot headers now carry enough metadata to inspect the snapshot scope after restore
+- `restore --preview` shows copy/overwrite/conflict actions without modifying local files

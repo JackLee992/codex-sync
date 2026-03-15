@@ -20,6 +20,7 @@ Default portable scope:
 Optional:
 
 - `sessions/`
+- extra paths under `~/.codex`, such as `history.jsonl`
 
 Never synced by default:
 
@@ -27,7 +28,7 @@ Never synced by default:
 - `cap_sid`
 - `logs_*.sqlite*`
 - `state_*.sqlite*`
-- `history.jsonl`
+- `history.jsonl` unless you explicitly add it with `--extra-include history.jsonl`
 - `log/`
 - `tmp/`
 - `.sandbox/`
@@ -53,10 +54,22 @@ Use `scripts/codex_sync.py`.
 python scripts/codex_sync.py init --repo C:\sync\codex-data
 ```
 
+To make chat history portable too:
+
+```powershell
+python scripts/codex_sync.py init --repo C:\sync\codex-data --extra-include history.jsonl
+```
+
 ### Export current Codex data
 
 ```powershell
 python scripts/codex_sync.py backup --repo C:\sync\codex-data
+```
+
+To include sessions and chat history:
+
+```powershell
+python scripts/codex_sync.py backup --repo C:\sync\codex-data --include skills memories rules config sessions --extra-include history.jsonl
 ```
 
 ### Check differences against the sync workspace
@@ -68,7 +81,8 @@ python scripts/codex_sync.py status --repo C:\sync\codex-data
 ### Restore into this machine
 
 ```powershell
-python scripts/codex_sync.py restore --repo C:\sync\codex-data --strategy conflict
+python scripts/codex_sync.py restore --repo C:\sync\codex-data --strategy conflict --preview
+python scripts/codex_sync.py restore --repo C:\sync\codex-data --strategy conflict --extra-include history.jsonl
 ```
 
 ### Create an encrypted snapshot for GitHub
@@ -94,11 +108,14 @@ This prompts for the password again before decrypting.
 - `keep`: keep local file and skip incoming changes
 - `newer`: choose the file with the newer modification time
 
+`restore --preview` reports planned actions without changing local files.
+
 ## Encrypted Snapshots
 
 - `snapshot-create` requires a password. If you do not pass `--password` or `--password-env`, it prompts and asks for confirmation.
 - `snapshot-restore` requires the same password to decrypt.
 - The encrypted snapshot is the file you can safely commit or sync to GitHub instead of the plaintext `data/` directory.
+- The snapshot header now records scope metadata such as file count, include targets, extra paths, source machine, and manifest generation time.
 - Credentials are still excluded from the snapshot because they are excluded from the sync workspace itself.
 
 ## When To Read References
