@@ -255,6 +255,44 @@ def command_status(args: argparse.Namespace) -> None:
                     print(item)
 
 
+def command_diff(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).expanduser().resolve()
+    _, config_path, manifest_path = ensure_repo_initialized(repo)
+    if not manifest_path.exists():
+        raise SystemExit("Manifest missing; run backup first.")
+    config = load_json(config_path, {})
+    include = normalize_include(args.include or config.get("default_include", DEFAULT_INCLUDE))
+    codex_home = codex_home_from_arg(args.codex_home)
+
+    only_local, only_repo, changed, _ = compare_local_to_repo(codex_home, repo, include)
+    local = manifest_from_source(codex_home, include)
+    repo_manifest = load_manifest_entries(manifest_path)
+
+    for label, items in (
+        ("LOCAL_ONLY", only_local),
+        ("REPO_ONLY", only_repo),
+    ):
+        if items:
+            print(f"[{label}]")
+            for item in items:
+                print(item)
+            print()
+
+    if changed:
+        print("[CHANGED]")
+        for item in changed:
+            local_entry = local[item]
+            repo_entry = repo_manifest[item]
+            print(item)
+            print(f"  local_sha256: {local_entry.sha256}")
+            print(f"  repo_sha256 : {repo_entry.sha256}")
+            print(f"  local_mtime : {local_entry.mtime}")
+            print(f"  repo_mtime  : {repo_entry.mtime}")
+            print()
+    elif not only_local and not only_repo:
+        print("No differences.")
+
+
 def write_incoming_conflict(dst: Path, src: Path) -> Path:
     conflict_path = dst.with_name(dst.name + ".codex-sync-incoming")
     copy_with_mtime(src, conflict_path)
@@ -345,6 +383,12 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--include", nargs="+", help=f"Include set: {', '.join(ALL_INCLUDE)}")
     status_parser.add_argument("--verbose", action="store_true", help="List differing files.")
     status_parser.set_defaults(func=command_status)
+
+    diff_parser = subparsers.add_parser("diff", help="List file-level differences in detail.")
+    diff_parser.add_argument("--repo", required=True, help="Path to the sync workspace.")
+    diff_parser.add_argument("--codex-home", help="Override Codex home. Defaults to ~/.codex")
+    diff_parser.add_argument("--include", nargs="+", help=f"Include set: {', '.join(ALL_INCLUDE)}")
+    diff_parser.set_defaults(func=command_diff)
 
     restore_parser = subparsers.add_parser("restore", help="Restore sync workspace data into local Codex.")
     restore_parser.add_argument("--repo", required=True, help="Path to the sync workspace.")
