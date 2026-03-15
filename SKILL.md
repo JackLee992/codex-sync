@@ -6,7 +6,7 @@ metadata:
 
 # Codex Sync
 
-Use this skill to keep portable Codex data aligned across multiple computers. It creates a clean sync workspace, exports selected data from `~/.codex`, and restores it with explicit conflict handling.
+Use this skill to keep portable Codex data aligned across multiple computers. It creates a clean sync workspace, exports selected data from `~/.codex`, restores it with explicit conflict handling, and can pack that workspace into an encrypted snapshot file for syncing through GitHub or other remote storage.
 
 ## What This Skill Syncs
 
@@ -41,6 +41,8 @@ Never synced by default:
 4. Run `status` on the destination machine to see drift.
 5. Run `restore` with an explicit merge strategy.
 
+If you do not want to sync the workspace in plaintext, create an encrypted snapshot after `backup`, publish only the encrypted file, and restore the snapshot on the other machine with the password.
+
 ## Commands
 
 Use `scripts/codex_sync.py`.
@@ -69,12 +71,35 @@ python scripts/codex_sync.py status --repo C:\sync\codex-data
 python scripts/codex_sync.py restore --repo C:\sync\codex-data --strategy conflict
 ```
 
+### Create an encrypted snapshot for GitHub
+
+```powershell
+python scripts/codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\codex-data\codex-sync.snapshot
+```
+
+This prompts for a password and writes a single encrypted file.
+
+### Restore a workspace from an encrypted snapshot
+
+```powershell
+python scripts/codex_sync.py snapshot-restore --snapshot C:\sync\codex-data\codex-sync.snapshot --repo C:\sync\codex-data --force
+```
+
+This prompts for the password again before decrypting.
+
 ## Merge Strategies
 
 - `conflict`: safe default; keep local file and write incoming copy as `*.codex-sync-incoming`
 - `backup`: overwrite local file from the sync workspace
 - `keep`: keep local file and skip incoming changes
 - `newer`: choose the file with the newer modification time
+
+## Encrypted Snapshots
+
+- `snapshot-create` requires a password. If you do not pass `--password` or `--password-env`, it prompts and asks for confirmation.
+- `snapshot-restore` requires the same password to decrypt.
+- The encrypted snapshot is the file you can safely commit or sync to GitHub instead of the plaintext `data/` directory.
+- Credentials are still excluded from the snapshot because they are excluded from the sync workspace itself.
 
 ## When To Read References
 

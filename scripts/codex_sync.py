@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import hmac
 import json
 import os
+import secrets
 import shutil
 import socket
+import struct
+import tarfile
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from getpass import getpass
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Tuple
 
@@ -16,6 +23,8 @@ DEFAULT_INCLUDE = ("skills", "memories", "rules", "config")
 OPTIONAL_INCLUDE = ("sessions",)
 ALL_INCLUDE = DEFAULT_INCLUDE + OPTIONAL_INCLUDE
 SYSTEM_SKILL_PREFIX = "skills/.system/"
+SNAPSHOT_MAGIC = b"CDXSNAP1"
+SNAPSHOT_TAG_SIZE = 32
 
 
 @dataclass
@@ -156,6 +165,99 @@ def remove_empty_dirs(root: Path) -> None:
                 path.rmdir()
             except OSError:
                 pass
+
+
+def derive_keys(password: str, salt: bytes) -> Tuple[bytes, bytes]:
+    material = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=64)
+    return material[:32], material[32:]
+
+
+def keystream_block(enc_key: bytes, nonce: bytes, counter: int) -> bytes:
+    return hmac.new(enc_key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest()
+
+
+def xor_stream_file(src: Path, dst: Path, enc_key: bytes, nonce: bytes, mac_key: bytes | None = None, mac_prefix: bytes = b"") -> bytes:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    mac = hmac.new(mac_key, digestmod=hashlib.sha256) if mac_key is not None else None
+    if mac is not None and mac_prefix:
+        mac.update(mac_prefix)
+    counter = 0
+    with src.open("rb") as reader, dst.open("wb") as writer:
+        while True:
+            chunk = reader.read(1024 * 1024)
+            if not chunk:
+                break
+            output = bytearray(len(chunk))
+            offset = 0
+            while offset < len(chunk):
+                block = keystream_block(enc_key, nonce, counter)
+                counter += 1
+                take = min(len(block), len(chunk) - offset)
+                for idx in range(take):
+                    output[offset + idx] = chunk[offset + idx] ^ block[idx]
+                offset += take
+            out_bytes = bytes(output)
+            writer.write(out_bytes)
+            if mac is not None:
+                mac.update(out_bytes)
+    return mac.digest() if mac is not None else b""
+
+
+def get_password(args: argparse.Namespace, purpose: str, confirm: bool = False) -> str:
+    if getattr(args, "password_env", None):
+        value = os.environ.get(args.password_env)
+        if not value:
+            raise SystemExit(f"Environment variable is empty or missing: {args.password_env}")
+        return value
+    if getattr(args, "password", None):
+        if confirm and getattr(args, "password_confirm", None) is not None and args.password != args.password_confirm:
+            raise SystemExit("Password confirmation does not match.")
+        return args.password
+
+    first = getpass(f"{purpose} password: ")
+    if not first:
+        raise SystemExit("Password cannot be empty.")
+    if confirm:
+        second = getpass("Confirm password: ")
+        if first != second:
+            raise SystemExit("Password confirmation does not match.")
+    return first
+
+
+def build_snapshot_header(salt: bytes, nonce: bytes, repo: Path) -> bytes:
+    header = {
+        "created_at": utc_now(),
+        "format": "codex-sync-snapshot",
+        "hostname": socket.gethostname(),
+        "nonce": base64.b64encode(nonce).decode("ascii"),
+        "repo_name": repo.name,
+        "salt": base64.b64encode(salt).decode("ascii"),
+        "version": 1,
+    }
+    return json.dumps(header, sort_keys=True).encode("utf-8")
+
+
+def write_snapshot_archive(repo: Path, archive_path: Path) -> None:
+    with tarfile.open(archive_path, "w:gz") as tar:
+        for relative in (".codex-sync", "data"):
+            source = repo / relative
+            if source.exists():
+                tar.add(source, arcname=relative)
+
+
+def ensure_snapshot_repo_layout(repo: Path, force: bool) -> None:
+    if repo.exists():
+        meta = repo / ".codex-sync"
+        data = repo / "data"
+        has_existing = meta.exists() or data.exists()
+        if has_existing and not force:
+            raise SystemExit(f"Target repo already contains sync data: {repo}. Use --force to replace it.")
+        if force:
+            if meta.exists():
+                shutil.rmtree(meta)
+            if data.exists():
+                shutil.rmtree(data)
+    repo.mkdir(parents=True, exist_ok=True)
 
 
 def command_init(args: argparse.Namespace) -> None:
@@ -358,6 +460,70 @@ def command_restore(args: argparse.Namespace) -> None:
     print(f"Conflicts   : {conflicts}")
 
 
+def command_snapshot_create(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).expanduser().resolve()
+    ensure_repo_initialized(repo)
+    output = Path(args.output).expanduser().resolve()
+    password = get_password(args, "Snapshot", confirm=True)
+    salt = secrets.token_bytes(16)
+    nonce = secrets.token_bytes(16)
+    enc_key, mac_key = derive_keys(password, salt)
+    header = build_snapshot_header(salt, nonce, repo)
+    header_prefix = SNAPSHOT_MAGIC + struct.pack(">I", len(header)) + header
+
+    with tempfile.TemporaryDirectory(prefix="codex-sync-pack-") as tmpdir:
+        archive_path = Path(tmpdir) / "snapshot.tar.gz"
+        encrypted_path = Path(tmpdir) / "snapshot.enc.bin"
+        write_snapshot_archive(repo, archive_path)
+        ciphertext_tag = xor_stream_file(archive_path, encrypted_path, enc_key, nonce, mac_key=mac_key, mac_prefix=header_prefix)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("wb") as writer, encrypted_path.open("rb") as reader:
+            writer.write(header_prefix)
+            shutil.copyfileobj(reader, writer)
+            writer.write(ciphertext_tag)
+
+    print(f"Created encrypted snapshot: {output}")
+
+
+def command_snapshot_restore(args: argparse.Namespace) -> None:
+    snapshot = Path(args.snapshot).expanduser().resolve()
+    repo = Path(args.repo).expanduser().resolve()
+    password = get_password(args, "Snapshot", confirm=False)
+    with snapshot.open("rb") as reader:
+        magic = reader.read(len(SNAPSHOT_MAGIC))
+        if magic != SNAPSHOT_MAGIC:
+            raise SystemExit("Invalid snapshot file.")
+        header_len = struct.unpack(">I", reader.read(4))[0]
+        header = reader.read(header_len)
+        header_obj = json.loads(header.decode("utf-8"))
+        ciphertext = reader.read()
+    if len(ciphertext) < SNAPSHOT_TAG_SIZE:
+        raise SystemExit("Snapshot payload is truncated.")
+
+    tag = ciphertext[-SNAPSHOT_TAG_SIZE:]
+    cipher_bytes = ciphertext[:-SNAPSHOT_TAG_SIZE]
+    salt = base64.b64decode(header_obj["salt"])
+    nonce = base64.b64decode(header_obj["nonce"])
+    enc_key, mac_key = derive_keys(password, salt)
+    expected_mac = hmac.new(mac_key, digestmod=hashlib.sha256)
+    expected_mac.update(SNAPSHOT_MAGIC + struct.pack(">I", len(header)) + header)
+    expected_mac.update(cipher_bytes)
+    expected_tag = expected_mac.digest()
+    if not hmac.compare_digest(tag, expected_tag):
+        raise SystemExit("Snapshot password is incorrect or the file was tampered with.")
+
+    ensure_snapshot_repo_layout(repo, force=args.force)
+    with tempfile.TemporaryDirectory(prefix="codex-sync-unpack-") as tmpdir:
+        encrypted_path = Path(tmpdir) / "snapshot.enc.bin"
+        archive_path = Path(tmpdir) / "snapshot.tar.gz"
+        encrypted_path.write_bytes(cipher_bytes)
+        xor_stream_file(encrypted_path, archive_path, enc_key, nonce)
+        with tarfile.open(archive_path, "r:gz") as tar:
+            tar.extractall(repo)
+
+    print(f"Restored encrypted snapshot into: {repo}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Backup and sync portable Codex data.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -389,6 +555,22 @@ def build_parser() -> argparse.ArgumentParser:
     diff_parser.add_argument("--codex-home", help="Override Codex home. Defaults to ~/.codex")
     diff_parser.add_argument("--include", nargs="+", help=f"Include set: {', '.join(ALL_INCLUDE)}")
     diff_parser.set_defaults(func=command_diff)
+
+    snapshot_create_parser = subparsers.add_parser("snapshot-create", help="Create an encrypted snapshot file from a sync workspace.")
+    snapshot_create_parser.add_argument("--repo", required=True, help="Path to the sync workspace.")
+    snapshot_create_parser.add_argument("--output", required=True, help="Encrypted snapshot file to create.")
+    snapshot_create_parser.add_argument("--password", help="Password for non-interactive use.")
+    snapshot_create_parser.add_argument("--password-confirm", help="Confirmation for non-interactive use.")
+    snapshot_create_parser.add_argument("--password-env", help="Read the password from an environment variable.")
+    snapshot_create_parser.set_defaults(func=command_snapshot_create)
+
+    snapshot_restore_parser = subparsers.add_parser("snapshot-restore", help="Restore a sync workspace from an encrypted snapshot file.")
+    snapshot_restore_parser.add_argument("--snapshot", required=True, help="Encrypted snapshot file to restore.")
+    snapshot_restore_parser.add_argument("--repo", required=True, help="Target sync workspace directory.")
+    snapshot_restore_parser.add_argument("--password", help="Password for non-interactive use.")
+    snapshot_restore_parser.add_argument("--password-env", help="Read the password from an environment variable.")
+    snapshot_restore_parser.add_argument("--force", action="store_true", help="Replace existing .codex-sync and data directories in the target repo.")
+    snapshot_restore_parser.set_defaults(func=command_snapshot_restore)
 
     restore_parser = subparsers.add_parser("restore", help="Restore sync workspace data into local Codex.")
     restore_parser.add_argument("--repo", required=True, help="Path to the sync workspace.")

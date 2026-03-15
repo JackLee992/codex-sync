@@ -4,6 +4,8 @@ Portable backup and sync for Codex user data.
 
 This skill snapshots the parts of `~/.codex` that are safe and useful to move between machines, then restores them with explicit conflict handling.
 
+It also supports encrypted snapshots so the sync artifact itself can be pushed to GitHub without exposing the plaintext contents.
+
 ## What It Syncs
 
 Default:
@@ -45,6 +47,8 @@ python codex_sync.py backup --repo C:\sync\codex-data
 python codex_sync.py status --repo C:\sync\codex-data
 python codex_sync.py diff --repo C:\sync\codex-data
 python codex_sync.py restore --repo C:\sync\codex-data --strategy conflict
+python codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\codex-data\codex-sync.snapshot
+python codex_sync.py snapshot-restore --snapshot C:\sync\codex-data\codex-sync.snapshot --repo C:\sync\codex-data --force
 ```
 
 ## Restore Strategies
@@ -61,3 +65,11 @@ python codex_sync.py restore --repo C:\sync\codex-data --strategy conflict
 3. Move the workspace using Git, Syncthing, OneDrive, or similar.
 4. Run `diff` or `status` on machine B.
 5. Run `restore` with the strategy you want.
+
+## Encrypted Snapshot Flow
+
+1. Run `backup` on machine A.
+2. Run `snapshot-create` and set a password.
+3. Sync only the encrypted snapshot file to GitHub.
+4. On machine B, pull the snapshot file and run `snapshot-restore`.
+5. Enter the same password, then run `diff` or `restore`.

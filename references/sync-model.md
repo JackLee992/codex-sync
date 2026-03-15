@@ -17,6 +17,7 @@
     rules/
     skills/
     sessions/
+  codex-sync.snapshot
 ```
 
 ## Scope
@@ -87,3 +88,19 @@ Use one sync workspace per Codex identity. Keep that workspace in:
 - a Git repo for reviewable history
 - a cloud-synced folder for fast personal sync
 - Syncthing if you want peer-to-peer sync
+
+## Encrypted Snapshot Mode
+
+If you do not want the `data/` directory in plaintext on a remote service, use:
+
+- `snapshot-create` to pack `.codex-sync/` and `data/` into one encrypted file
+- `snapshot-restore` to unpack it on another machine
+
+The password is not stored in the workspace. Without the password, the snapshot cannot be restored.
+
+Recommended GitHub pattern:
+
+1. Keep a local sync workspace.
+2. Create `codex-sync.snapshot`.
+3. Push only the encrypted snapshot file to the remote repo.
+4. Pull it on another machine and restore locally.
