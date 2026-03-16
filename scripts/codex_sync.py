@@ -21,6 +21,11 @@ from getpass import getpass
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Set, Tuple
 
+try:
+    from Crypto.Protocol.KDF import scrypt as crypto_scrypt
+except ImportError:
+    crypto_scrypt = None
+
 
 DEFAULT_INCLUDE = ("skills", "memories", "rules", "config")
 OPTIONAL_INCLUDE = ("sessions",)
@@ -281,7 +286,12 @@ def remove_empty_dirs(root: Path) -> None:
 
 
 def derive_keys(password: str, salt: bytes) -> Tuple[bytes, bytes]:
-    material = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=64)
+    if hasattr(hashlib, "scrypt"):
+        material = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=64)
+    elif crypto_scrypt is not None:
+        material = crypto_scrypt(password.encode("utf-8"), salt=salt, key_len=64, N=2**14, r=8, p=1)
+    else:
+        raise SystemExit("This Python build does not provide scrypt support.")
     return material[:32], material[32:]
 
 
