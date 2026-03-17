@@ -42,6 +42,7 @@ Excluded by default:
 - logs and tmp directories
 - sandbox directories
 - machine-local runtime state
+- `*.codex-sync-incoming` conflict copies created by `restore --strategy conflict`
 
 ## Backup
 
@@ -103,10 +104,12 @@ Use one sync workspace per Codex identity. Keep that workspace in:
 If you do not want the `data/` directory in plaintext on a remote service, use:
 
 - `snapshot-create` to pack `.codex-sync/` and `data/` into one encrypted file
+- `snapshot-verify` to confirm a candidate password and validate the encrypted archive before restoring
 - `snapshot-info` to inspect header metadata without decrypting or restoring
 - `snapshot-restore` to unpack it on another machine
 
 The password is not stored in the workspace. Without the password, the snapshot cannot be restored.
+Choose a deliberate password and record it outside the snapshot itself if you plan to reuse it later.
 The snapshot header records metadata such as file count, include scope, extra paths, source machine, manifest generation time, and runtime version details.
 Use `snapshot-create --auto-name` if you want the output filename to include machine/platform/timestamp markers for easier comparison across computers.
 

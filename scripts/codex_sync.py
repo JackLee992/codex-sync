@@ -10,6 +10,7 @@ import platform
 import secrets
 import shutil
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -31,9 +32,10 @@ DEFAULT_INCLUDE = ("skills", "memories", "rules", "config")
 OPTIONAL_INCLUDE = ("sessions",)
 ALL_INCLUDE = DEFAULT_INCLUDE + OPTIONAL_INCLUDE
 SYSTEM_SKILL_PREFIX = "skills/.system/"
+CONFLICT_COPY_SUFFIX = ".codex-sync-incoming"
 SNAPSHOT_MAGIC = b"CDXSNAP1"
 SNAPSHOT_TAG_SIZE = 32
-TOOL_VERSION = 2
+TOOL_VERSION = 3
 
 
 @dataclass
@@ -163,6 +165,10 @@ def gather_runtime_metadata() -> dict:
     }
 
 
+def should_skip_relative(relative: str) -> bool:
+    return relative.startswith(SYSTEM_SKILL_PREFIX) or relative.endswith(CONFLICT_COPY_SUFFIX)
+
+
 def ensure_repo_initialized(repo: Path) -> Tuple[Path, Path, Path]:
     meta, config_path, manifest_path = repo_paths(repo)
     if not config_path.exists():
@@ -190,7 +196,7 @@ def iter_selected_files(codex_home: Path, include: Iterable[str]) -> Iterator[Tu
             if not path.is_file():
                 continue
             relative = path.relative_to(codex_home).as_posix()
-            if relative.startswith(SYSTEM_SKILL_PREFIX):
+            if should_skip_relative(relative):
                 continue
             yield relative, path
 
@@ -215,7 +221,7 @@ def iter_extra_selected_files(codex_home: Path, extra_include: Iterable[str]) ->
 
         for path in candidates:
             relative = path.relative_to(codex_home).as_posix()
-            if relative.startswith(SYSTEM_SKILL_PREFIX):
+            if should_skip_relative(relative):
                 continue
             if relative in seen:
                 continue
@@ -273,6 +279,14 @@ def load_manifest_entries(path: Path) -> Dict[str, FileEntry]:
 
 def copy_with_mtime(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() or dst.is_symlink():
+        try:
+            current_mode = dst.stat().st_mode
+            if not current_mode & stat.S_IWUSR:
+                dst.chmod(current_mode | stat.S_IWUSR)
+        except OSError:
+            pass
+        dst.unlink()
     shutil.copy2(src, dst)
 
 
@@ -436,6 +450,40 @@ def resolve_snapshot_output(repo: Path, output_value: str | None, auto_name: boo
         return (directory / filename).resolve()
 
     return output_root.resolve()
+
+
+def validate_snapshot_file(snapshot: Path, password: str, verify_archive: bool = False) -> tuple[dict, bytes, bytes, bytes]:
+    header, header_obj, ciphertext = read_snapshot_header(snapshot)
+    if len(ciphertext) < SNAPSHOT_TAG_SIZE:
+        raise SystemExit("Snapshot payload is truncated.")
+
+    tag = ciphertext[-SNAPSHOT_TAG_SIZE:]
+    cipher_bytes = ciphertext[:-SNAPSHOT_TAG_SIZE]
+    salt = base64.b64decode(header_obj["salt"])
+    nonce = base64.b64decode(header_obj["nonce"])
+    enc_key, mac_key = derive_keys(password, salt)
+    expected_mac = hmac.new(mac_key, digestmod=hashlib.sha256)
+    expected_mac.update(SNAPSHOT_MAGIC + struct.pack(">I", len(header)) + header)
+    expected_mac.update(cipher_bytes)
+    expected_tag = expected_mac.digest()
+    if not hmac.compare_digest(tag, expected_tag):
+        raise SystemExit("Snapshot password is incorrect or the file was tampered with.")
+
+    if verify_archive:
+        with tempfile.TemporaryDirectory(prefix="codex-sync-verify-") as tmpdir:
+            encrypted_path = Path(tmpdir) / "snapshot.enc.bin"
+            archive_path = Path(tmpdir) / "snapshot.tar.gz"
+            encrypted_path.write_bytes(cipher_bytes)
+            xor_stream_file(encrypted_path, archive_path, enc_key, nonce)
+            with tarfile.open(archive_path, "r:gz") as tar:
+                top_level_entries = {member.name.split("/", 1)[0] for member in tar.getmembers()}
+            required_entries = {".codex-sync", "data"}
+            missing_entries = required_entries - top_level_entries
+            if missing_entries:
+                missing_list = ", ".join(sorted(missing_entries))
+                raise SystemExit(f"Snapshot archive is missing required entries: {missing_list}")
+
+    return header_obj, cipher_bytes, enc_key, nonce
 
 
 def read_snapshot_header(snapshot: Path) -> tuple[bytes, dict, bytes]:
@@ -755,27 +803,16 @@ def command_snapshot_create(args: argparse.Namespace) -> None:
             writer.write(ciphertext_tag)
 
     print(f"Created encrypted snapshot: {output}")
+    if not args.no_verify:
+        validate_snapshot_file(output, password, verify_archive=True)
+        print(f"Verified encrypted snapshot: {output}")
 
 
 def command_snapshot_restore(args: argparse.Namespace) -> None:
     snapshot = Path(args.snapshot).expanduser().resolve()
     repo = Path(args.repo).expanduser().resolve()
     password = get_password(args, "Snapshot", confirm=False)
-    header, header_obj, ciphertext = read_snapshot_header(snapshot)
-    if len(ciphertext) < SNAPSHOT_TAG_SIZE:
-        raise SystemExit("Snapshot payload is truncated.")
-
-    tag = ciphertext[-SNAPSHOT_TAG_SIZE:]
-    cipher_bytes = ciphertext[:-SNAPSHOT_TAG_SIZE]
-    salt = base64.b64decode(header_obj["salt"])
-    nonce = base64.b64decode(header_obj["nonce"])
-    enc_key, mac_key = derive_keys(password, salt)
-    expected_mac = hmac.new(mac_key, digestmod=hashlib.sha256)
-    expected_mac.update(SNAPSHOT_MAGIC + struct.pack(">I", len(header)) + header)
-    expected_mac.update(cipher_bytes)
-    expected_tag = expected_mac.digest()
-    if not hmac.compare_digest(tag, expected_tag):
-        raise SystemExit("Snapshot password is incorrect or the file was tampered with.")
+    header_obj, cipher_bytes, enc_key, nonce = validate_snapshot_file(snapshot, password, verify_archive=False)
 
     ensure_snapshot_repo_layout(repo, force=args.force)
     with tempfile.TemporaryDirectory(prefix="codex-sync-unpack-") as tmpdir:
@@ -791,6 +828,16 @@ def command_snapshot_restore(args: argparse.Namespace) -> None:
     if snapshot_meta:
         print(f"Snapshot files : {snapshot_meta.get('file_count', 'unknown')}")
         print(f"Snapshot scope : {summarize_scope(snapshot_meta.get('include', []), snapshot_meta.get('extra_include', []))}")
+
+
+def command_snapshot_verify(args: argparse.Namespace) -> None:
+    snapshot = Path(args.snapshot).expanduser().resolve()
+    password = get_password(args, "Snapshot", confirm=False)
+    header_obj, _, _, _ = validate_snapshot_file(snapshot, password, verify_archive=True)
+    print(f"Verified encrypted snapshot: {snapshot}")
+    print_snapshot_summary(header_obj, snapshot)
+    print("Password check: ok")
+    print("Archive check : ok")
 
 
 def command_snapshot_info(args: argparse.Namespace) -> None:
@@ -851,6 +898,7 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot_create_parser.add_argument("--password", help="Password for non-interactive use.")
     snapshot_create_parser.add_argument("--password-confirm", help="Confirmation for non-interactive use.")
     snapshot_create_parser.add_argument("--password-env", help="Read the password from an environment variable.")
+    snapshot_create_parser.add_argument("--no-verify", action="store_true", help="Skip post-write verification of the snapshot archive.")
     snapshot_create_parser.set_defaults(func=command_snapshot_create)
 
     snapshot_restore_parser = subparsers.add_parser("snapshot-restore", help="Restore a sync workspace from an encrypted snapshot file.")
@@ -860,6 +908,12 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot_restore_parser.add_argument("--password-env", help="Read the password from an environment variable.")
     snapshot_restore_parser.add_argument("--force", action="store_true", help="Replace existing .codex-sync and data directories in the target repo.")
     snapshot_restore_parser.set_defaults(func=command_snapshot_restore)
+
+    snapshot_verify_parser = subparsers.add_parser("snapshot-verify", help="Verify a snapshot password and archive without restoring files.")
+    snapshot_verify_parser.add_argument("--snapshot", required=True, help="Encrypted snapshot file to verify.")
+    snapshot_verify_parser.add_argument("--password", help="Password for non-interactive use.")
+    snapshot_verify_parser.add_argument("--password-env", help="Read the password from an environment variable.")
+    snapshot_verify_parser.set_defaults(func=command_snapshot_verify)
 
     snapshot_info_parser = subparsers.add_parser("snapshot-info", help="Read snapshot metadata without decrypting the payload.")
     snapshot_info_parser.add_argument("--snapshot", required=True, help="Encrypted snapshot file to inspect.")

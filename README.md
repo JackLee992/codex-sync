@@ -28,6 +28,7 @@ Excluded by default:
 - logs
 - tmp
 - sandbox directories
+- `*.codex-sync-incoming` conflict copies
 
 ## Install
 
@@ -51,12 +52,15 @@ python codex_sync.py restore --repo C:\sync\codex-data --strategy conflict --pre
 python codex_sync.py restore --repo C:\sync\codex-data --strategy conflict --extra-include history.jsonl
 python codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\codex-data\codex-sync.snapshot
 python codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\snapshots --auto-name
+python codex_sync.py snapshot-verify --snapshot C:\sync\snapshots\codex-sync-desktop-a-windows-20260315T120000Z-sess-hist-f118.snapshot
 python codex_sync.py snapshot-info --snapshot C:\sync\snapshots\codex-sync-desktop-a-windows-20260315T120000Z-sess-hist-f118.snapshot
 python codex_sync.py snapshot-restore --snapshot C:\sync\codex-data\codex-sync.snapshot --repo C:\sync\codex-data --force
 ```
 
 `--extra-include` accepts file or directory paths relative to `~/.codex`. The most useful example is `history.jsonl`.
 `snapshot-create --auto-name` generates a filename like `codex-sync-<machine>-<platform>-<timestamp>-<scope>.snapshot`.
+`snapshot-create` now verifies the written snapshot by default. Use `--no-verify` only when you intentionally want to skip the post-write check.
+`snapshot-verify` checks a candidate password and confirms that the encrypted archive can be opened without writing anything into `~/.codex`.
 `snapshot-info` reads the unencrypted header only, so you can inspect version, machine, platform, and scope before restoring.
 
 ## Restore Strategies
@@ -78,10 +82,11 @@ python codex_sync.py snapshot-restore --snapshot C:\sync\codex-data\codex-sync.s
 ## Encrypted Snapshot Flow
 
 1. Run `backup` on machine A.
-2. Run `snapshot-create` and set a password.
+2. Run `snapshot-create` and set a deliberate password that you will keep or record outside the snapshot itself.
 3. Sync only the encrypted snapshot file to GitHub.
-4. On machine B, pull the snapshot file and run `snapshot-restore`.
-5. Enter the same password, then run `diff` or `restore`.
+4. Run `snapshot-verify` if you want to confirm the password before writing any files on machine B.
+5. On machine B, pull the snapshot file and run `snapshot-restore`.
+6. Enter the same password, then run `diff` or `restore`.
 
 ## What Changed In This Version
 
@@ -89,5 +94,6 @@ python codex_sync.py snapshot-restore --snapshot C:\sync\codex-data\codex-sync.s
 - workspace manifests now record include scope, extra paths, source machine, and tool version
 - workspace manifests and snapshot headers now record tool, platform, Python, and Codex CLI version info when available
 - encrypted snapshot headers now carry enough metadata to inspect the snapshot scope after restore
+- `snapshot-create` now verifies newly written snapshots by default and `snapshot-verify` checks passwords without restoring files
 - snapshot files can now be auto-named with machine/platform/time markers for easier multi-machine comparison
 - `restore --preview` shows copy/overwrite/conflict actions without modifying local files

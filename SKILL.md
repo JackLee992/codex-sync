@@ -33,6 +33,7 @@ Never synced by default:
 - `tmp/`
 - `.sandbox/`
 - `.sandbox-bin/`
+- `*.codex-sync-incoming` conflict copies created by restore
 
 ## Workflow
 
@@ -90,10 +91,12 @@ python scripts/codex_sync.py restore --repo C:\sync\codex-data --strategy confli
 ```powershell
 python scripts/codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\codex-data\codex-sync.snapshot
 python scripts/codex_sync.py snapshot-create --repo C:\sync\codex-data --output C:\sync\snapshots --auto-name
+python scripts/codex_sync.py snapshot-verify --snapshot C:\sync\snapshots\codex-sync-desktop-a-windows-20260315T120000Z-sess-hist-f118.snapshot
 ```
 
 This prompts for a password and writes a single encrypted file.
 With `--auto-name`, the file name includes machine, platform, UTC timestamp, and scope markers such as sessions/history.
+`snapshot-create` verifies the written snapshot by default, and `snapshot-verify` lets you confirm a password without restoring any files.
 
 ### Restore a workspace from an encrypted snapshot
 
@@ -124,7 +127,9 @@ This reads only the snapshot header so you can see machine, version, runtime, an
 ## Encrypted Snapshots
 
 - `snapshot-create` requires a password. If you do not pass `--password` or `--password-env`, it prompts and asks for confirmation.
+- Use a deliberate password that you keep or record outside the snapshot itself. If you rotate passwords per run, record which password was used before you publish the file.
 - `snapshot-restore` requires the same password to decrypt.
+- `snapshot-verify` is the fastest way to check whether a candidate password matches before you restore anything.
 - The encrypted snapshot is the file you can safely commit or sync to GitHub instead of the plaintext `data/` directory.
 - The snapshot header now records scope metadata such as file count, include targets, extra paths, source machine, manifest generation time, tool version, platform info, Python version, and Codex CLI version when detectable.
 - Credentials are still excluded from the snapshot because they are excluded from the sync workspace itself.
